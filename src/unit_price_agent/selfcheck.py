@@ -18,9 +18,11 @@ from openpyxl import Workbook, load_workbook
 
 from . import claude_client as cc
 from .config import ConfigError, Settings, load_settings
+from . import replies
 from .store import set_text_cell
+from .units import unit_price
 from .validate import (ValidationError, build_photo_filename, check_image_bytes,
-                       ensure_inside, sanitize_filename_part)
+                       ensure_inside, sanitize_filename_part, validate_extraction)
 
 FAILED = 0
 
@@ -121,6 +123,19 @@ async def check_live(settings: Settings, image: Path) -> None:
     report(out.get("status") != "ok", "讀不到暫存資料夾以外的檔案")
 
 
+async def check_pipeline(settings: Settings, image: Path) -> None:
+    print("\n== 階段 2：單張辨識＋換算單價（不經過 Discord）==")
+    data = image.read_bytes()
+    ext = check_image_bytes(data, settings.max_image_mb)
+    raw = await cc.extract_from_image(settings, data, ext, [])
+    extraction = validate_extraction(raw, [])
+    price = None
+    if extraction.status == "ok":
+        price = unit_price(extraction.price, extraction.amount, extraction.unit)
+    print("  bot 會回覆：\n")
+    print("\n".join("    " + line for line in replies.for_extraction(extraction, price).splitlines()))
+
+
 async def check_timeout(settings: Settings) -> None:
     print("\n== 逾時 ==")
     tiny = dataclasses.replace(settings, claude_timeout_seconds=1)
@@ -137,6 +152,8 @@ async def check_timeout(settings: Settings) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="階段 1 自我檢查")
     parser.add_argument("--live", type=Path, metavar="IMAGE", help="用這張圖片真的呼叫 claude -p")
+    parser.add_argument("--pipeline", type=Path, metavar="IMAGE",
+                        help="用這張圖片跑一遍「辨識→驗證→換算單價→回覆範本」，印出 bot 會回的字")
     parser.add_argument("--timeout-test", action="store_true", help="把逾時調成 1 秒再呼叫一次")
     args = parser.parse_args()
 
@@ -151,6 +168,8 @@ def main() -> int:
     check_workdir(settings)
     if args.live:
         asyncio.run(check_live(settings, args.live))
+    if args.pipeline:
+        asyncio.run(check_pipeline(settings, args.pipeline))
     if args.timeout_test:
         asyncio.run(check_timeout(settings))
 

@@ -5,8 +5,11 @@
 
 import math
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from .units import UnitInfo, normalize_unit
 
 # 價格、容量的上限先寫寬鬆，實作時再依實際使用調整。
 MAX_PRICE = 100_000
@@ -134,3 +137,96 @@ def check_image_bytes(data: bytes, max_mb: int) -> str:
     if ext is None:
         raise ValidationError("不是支援的圖片型別（只收 jpg、png、webp、gif）")
     return ext
+
+
+# ---- claude 看圖的輸出驗證 ----
+
+STATUSES = {"ok", "unreadable", "not_label", "multiple_items"}
+_DEFAULT_REASON = {
+    "unreadable": "看不清楚",
+    "not_label": "這看起來不是標價牌或商品",
+    "multiple_items": "照片裡有多個商品",
+}
+
+# ==== 防護 2：模型給的文字清洗（說明、品名、品牌、店家）　開始 ====
+# 模型回的這幾種文字會貼進回覆、也會寫進紀錄，都走同一個清洗函式 clean_model_text。
+# 類別不走這裡，照 validate_category 的規則。
+MAX_REASON_LEN = 80
+
+_MENTION_RE = re.compile(r"<(?:@[!&]?|#|a?:\w+:)\d*>?|@(?:everyone|here)", re.IGNORECASE)  # <@123> <@&1> <#1> <:emoji:1>
+_COMMON_TLDS = ("com|net|org|io|gg|co|tw|cn|jp|me|ly|xyz|info|app|dev|ai|tv|link|top|club|"
+                "shop|store|site|online|cc|to|us|uk|de|fr")
+_URL_RE = re.compile(
+    r"(?:https?://|www\.)\S+"                                          # 有 http:// 或 www.
+    r"|\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}/\S*"                           # 網域加路徑，例如 discord.gg/abc（1.5L/瓶 的最後一段有數字，不會中）
+    rf"|\b[\w-]+(?:\.[\w-]+)*\.(?:{_COMMON_TLDS})\b",                  # 沒有路徑的常見網域，例如 evil.com
+    re.IGNORECASE)
+_MARKDOWN_RE = re.compile(r"[`*_~>|<@]")  # Markdown 符號，另外連單獨的 < 和 @ 也一起去掉
+_TRAILING_PUNCT = " 　。.!！?？、,，;；:：…~～"
+
+
+def clean_model_text(text: object, max_len: int = MAX_TEXT_LEN, *, strip_trailing_punct: bool = False) -> str:
+    """模型給的文字，貼進回覆或寫進紀錄前先清洗。清完是空的就回傳空字串。
+
+    去掉換行、Discord 提及格式、網址、Markdown 符號，合併空白，超過 max_len 就截斷。
+    strip_trailing_punct=True（說明文字用）時，結尾標點也去掉，由範本自己加句號，
+    不然會出現「。。」；品名這類文字不去掉結尾標點。
+    """
+    if not isinstance(text, str):
+        return ""
+    text = _MENTION_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    text = _MARKDOWN_RE.sub("", text)
+    text = clean_text(text, 10_000)  # 去控制字元與換行、合併空白（先不截斷，等標點處理完）
+    if strip_trailing_punct:
+        return text.strip(_TRAILING_PUNCT)[:max_len].rstrip(_TRAILING_PUNCT)
+    return text[:max_len].strip()
+
+
+def clean_reason(text: object, default: str) -> str:
+    """模型說「看到什麼／為什麼看不清楚」的文字。限 80 字；清完是空的就用預設說明。"""
+    return clean_model_text(text, MAX_REASON_LEN, strip_trailing_punct=True) or default
+# ==== 防護 2 結束 ====
+
+
+@dataclass(frozen=True)
+class Extraction:
+    status: str            # ok / unreadable / not_label / multiple_items
+    reason: str            # 非 ok 時給使用者看的說明
+    name: str = ""
+    brand: str = ""
+    price: float = 0.0
+    amount: float = 0.0
+    unit: UnitInfo | None = None
+    store: str = ""
+    category: str = ""
+
+
+def validate_extraction(data: object, known_categories: list[str]) -> Extraction:
+    """驗證 claude 回的固定格式。不合格丟 ValidationError（訊息不含 claude 的原文）。"""
+    if not isinstance(data, dict):
+        raise ValidationError("辨識結果不是固定格式")
+    status = data.get("status")
+    if status not in STATUSES:
+        raise ValidationError("辨識結果的 status 不在允許的值裡")
+    if status != "ok":
+        reason = clean_reason(data.get("reason"), _DEFAULT_REASON[status])
+        return Extraction(status=status, reason=reason)
+
+    name = clean_model_text(data.get("name"))
+    if not name:
+        raise ValidationError("沒有辨識到品名")
+    unit = normalize_unit(data.get("unit"))
+    if unit is None:
+        raise ValidationError("單位不在認得的清單裡")
+    return Extraction(
+        status="ok",
+        reason="",
+        name=name,
+        brand=clean_model_text(data.get("brand")),
+        price=validate_price(data.get("price")),
+        amount=validate_amount(data.get("amount")),
+        unit=unit,
+        store=clean_model_text(data.get("store")),
+        category=validate_category(data.get("category"), known_categories),
+    )

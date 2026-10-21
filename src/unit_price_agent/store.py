@@ -3,6 +3,10 @@
 階段 1 先放防護 4（寫進 Excel 的文字一律當純文字）；紀錄的讀寫在階段 3 加。
 """
 
+import json
+import os
+from pathlib import Path
+
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, Cell
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -22,3 +26,20 @@ def set_text_cell(ws: Worksheet, row: int, column: int, text: str) -> Cell:
     cell.number_format = "@"
     return cell
 # ==== 防護 4 結束 ====
+
+
+def load_state(path: Path) -> dict:
+    """讀 state.json（限流計數、最後一次發週報的時間）。不存在或壞掉就當空的。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(path: Path, state: dict) -> None:
+    """先寫暫存檔再換名，避免寫到一半被中斷留下壞檔。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)

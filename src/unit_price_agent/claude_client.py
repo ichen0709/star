@@ -227,3 +227,12 @@ async def run_claude(settings: Settings, prompt: str, schema: dict, workdir: Pat
     if not isinstance(output, dict):
         raise ClaudeError("claude 沒有回固定格式的結果")
     return output
+
+
+async def extract_from_image(settings: Settings, data: bytes, ext: str,
+                             known_categories: list[str]) -> dict:
+    """一張圖 → claude 看圖 → 還沒驗證的固定格式結果。每次一個全新的暫存資料夾，用完刪掉。"""
+    with fresh_workdir(settings.data_dir) as workdir:
+        image = place_image(workdir, data, ext)
+        prompt = build_extract_prompt(image.name, known_categories)
+        return await run_claude(settings, prompt, EXTRACT_SCHEMA, workdir, TOOLS_VISION)
