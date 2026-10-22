@@ -369,7 +369,7 @@ WEEKLY_REPORT_TIME=
 | #32～#41（安全與例外） | 真的 Discord 手動測過，通過（#32～#38、#39、#40、#41） |
 
 備註：
-- #32 實際用 `-196 檸檬沙瓦`、`+Plus 乳酸菌飲料`、`@Cafe 拿鐵` 三張標價牌測（品名開頭分別是 `-`、`+`、`@`）：Excel 內容都是純文字，`@` 被清洗掉。原本要測的 `=1+1`，因為模型給的類別不符合當時的類別規則，整張被擋、沒有建檔，所以**沒有用照片在真的 Discord 走完 `=` 開頭這一項**；這不影響防護 4，`=` 開頭的純文字儲存由單元測試驗證（類別規則之後改成先清洗，不再整張擋掉）。
+- #32 實際用 `-196 檸檬沙瓦`、`+Plus 乳酸菌飲料`、`@Cafe 拿鐵` 三張標價牌測（品名開頭分別是 `-`、`+`、`@`）：Excel 內容都是純文字，`@` 被清洗掉。原本的 `=1+1` 標價牌，在類別改成先清洗之前和之後各傳一次，兩次都被擋（回覆通用的「看不清楚或不合理」訊息），沒有建檔。原因未確認（曾推測是類別規則，但改成先清洗後仍被擋）。這一項沒有用照片走完，`=` 開頭的純文字儲存只由單元測試驗證。
 - #39：@ 到 bot 本人後回說明，通過。
 
 單元測試對應：#17 見 `test_someone_elses_record_cannot_be_changed`；#22 見 `test_query_lists_only_my_own_records`、`test_prompt_injection_cannot_reveal_other_peoples_records`；#27 見 `test_weekly_command_for_someone_with_nothing_this_week`、`test_no_records_this_week_means_no_report`（都在 `tests/` 底下）。要把這三項改成「通過」，需要用第二個帳號在真的 Discord 測完。
