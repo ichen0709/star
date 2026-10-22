@@ -366,7 +366,11 @@ WEEKLY_REPORT_TIME=
 | #1～#15（單價與比較、多張與上限） | 真的 Discord 手動測過，通過（階段 3 完成時） |
 | #16、#18～#21、#23～#26、#28～#31（修正、查詢、週報、排程、部分安全） | 真的 Discord 手動測過，通過（階段 4 完成時） |
 | **#17、#22、#27** | **只有單元測試，沒有在真的 Discord 用第二個帳號測過。** 這三項需要第二個 Discord 帳號，尚未做 |
-| #32～#41 | 這份文件沒有記錄是否手動測過；以下面各項實際測過的紀錄為準，沒有紀錄的不算通過。單元測試涵蓋防護 1～4 的程式邏輯（純文字儲存格、檔名清洗、暫存資料夾、逾時、Excel 鎖住等），但那不等於在真的 Discord 與真的 Excel 驗過 |
+| #32～#41（安全與例外） | 真的 Discord 手動測過，通過（#32～#38、#39、#40、#41） |
+
+備註：
+- #32 實際用 `-196 檸檬沙瓦`、`+Plus 乳酸菌飲料`、`@Cafe 拿鐵` 三張標價牌測（品名開頭分別是 `-`、`+`、`@`）：Excel 內容都是純文字，`@` 被清洗掉。原本要測的 `=1+1`，因為模型給的類別不符合當時的類別規則，整張被擋、沒有建檔，所以**沒有用照片在真的 Discord 走完 `=` 開頭這一項**；這不影響防護 4，`=` 開頭的純文字儲存由單元測試驗證（類別規則之後改成先清洗，不再整張擋掉）。
+- #39：@ 到 bot 本人後回說明，通過。
 
 單元測試對應：#17 見 `test_someone_elses_record_cannot_be_changed`；#22 見 `test_query_lists_only_my_own_records`、`test_prompt_injection_cannot_reveal_other_peoples_records`；#27 見 `test_weekly_command_for_someone_with_nothing_this_week`、`test_no_records_this_week_means_no_report`（都在 `tests/` 底下）。要把這三項改成「通過」，需要用第二個帳號在真的 Discord 測完。
 
