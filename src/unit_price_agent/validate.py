@@ -26,7 +26,7 @@ IMAGE_SIGNATURES = {
 ALLOWED_IMAGE_EXTS = {*IMAGE_SIGNATURES, ".webp"}
 
 _CONTROL_RE =re.compile(r"[\x00-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿]")
-_CATEGORY_RE = re.compile(r"[一-鿿A-Za-z0-9]{1,%d}" % MAX_CATEGORY_LEN)
+_CATEGORY_STRIP_RE = re.compile(r"[^一-鿿A-Za-z0-9]")
 
 
 class ValidationError(ValueError):
@@ -86,26 +86,34 @@ def clean_text(text: object, max_len: int = MAX_TEXT_LEN) -> str:
     return text[:max_len].strip()
 
 
-def validate_category(raw: object, known: list[str]) -> str:
-    """類別必須是這個人用過的名稱，或符合規則的新名稱。"""
-    cleaned = clean_text(raw, MAX_CATEGORY_LEN * 2)
+def _category_chars(text: object) -> str:
+    """只留中英文與數字，限 20 字。"""
+    if not isinstance(text, str):
+        return ""
+    return _CATEGORY_STRIP_RE.sub("", text)[:MAX_CATEGORY_LEN]
+
+
+def validate_category(raw: object, known: list[str], fallback_name: str = "") -> str:
+    """類別：先清洗成只剩中英文與數字（限 20 字），和這個人用過的名稱同名就沿用那個寫法。
+
+    清完是空的，改用清洗後的品名（fallback_name，同樣限 20 字）；品名也清不出內容才丟 ValidationError。
+    """
+    cleaned = _category_chars(raw) or _category_chars(fallback_name)
     if not cleaned:
-        raise ValidationError("類別是空的")
+        raise ValidationError("類別：清洗後是空的，品名也清不出可用的字")
     for name in known:
         if cleaned.casefold() == name.casefold():
             return name
-    if not _CATEGORY_RE.fullmatch(cleaned):
-        raise ValidationError("類別名稱不符合規則（只能是中英文與數字，最多 20 字）")
     return cleaned
 
 
 def _validate_positive_number(raw: object, upper: float, label: str) -> float:
     # bool 是 int 的子類別，要先排除
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise ValidationError(f"{label}不是數字")
+        raise ValidationError(f"{label}：不是數字")
     value = float(raw)
     if not math.isfinite(value) or value <= 0 or value > upper:
-        raise ValidationError(f"{label}超出合理範圍")
+        raise ValidationError(f"{label}：超出合理範圍")
     return value
 
 
@@ -203,22 +211,22 @@ class Extraction:
 
 
 def validate_extraction(data: object, known_categories: list[str]) -> Extraction:
-    """驗證 claude 回的固定格式。不合格丟 ValidationError（訊息不含 claude 的原文）。"""
+    """驗證 claude 回的固定格式。不合格丟 ValidationError（訊息只有「欄位：規則」，不含 claude 的原文）。"""
     if not isinstance(data, dict):
-        raise ValidationError("辨識結果不是固定格式")
+        raise ValidationError("辨識結果：不是固定格式")
     status = data.get("status")
     if status not in STATUSES:
-        raise ValidationError("辨識結果的 status 不在允許的值裡")
+        raise ValidationError("status：不在允許的值裡")
     if status != "ok":
         reason = clean_reason(data.get("reason"), _DEFAULT_REASON[status])
         return Extraction(status=status, reason=reason)
 
     name = clean_model_text(data.get("name"))
     if not name:
-        raise ValidationError("沒有辨識到品名")
+        raise ValidationError("品名：清洗後是空的")
     unit = normalize_unit(data.get("unit"))
     if unit is None:
-        raise ValidationError("單位不在認得的清單裡")
+        raise ValidationError("單位：不在認得的清單裡")
     return Extraction(
         status="ok",
         reason="",
@@ -228,5 +236,5 @@ def validate_extraction(data: object, known_categories: list[str]) -> Extraction
         amount=validate_amount(data.get("amount")),
         unit=unit,
         store=clean_model_text(data.get("store")),
-        category=validate_category(data.get("category"), known_categories),
+        category=validate_category(data.get("category"), known_categories, name),
     )

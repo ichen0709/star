@@ -1,5 +1,6 @@
 """回覆範本。回覆內容由程式用範本組出，只填入驗證過的欄位；claude 的文字不原樣貼進回覆。"""
 
+from . import compare as cmp
 from .units import UnitPrice
 from .validate import Extraction
 
@@ -10,8 +11,8 @@ def format_number(value: float) -> str:
     return text or "0"
 
 
-def processing(total: int) -> str:
-    return "處理中…" if total == 1 else f"處理中…（共 {total} 張，一張一張處理）"
+def processing(number: int, total: int) -> str:
+    return prefix(number, total) + "處理中…"
 
 
 def failure() -> str:
@@ -38,7 +39,24 @@ def prefix(number: int, total: int) -> str:
     return "" if total == 1 else f"【第 {number} 張】"
 
 
-def for_extraction(ex: Extraction, unit_price: UnitPrice | None) -> str:
+def comparison(result: cmp.Comparison, unit_price: UnitPrice) -> str:
+    label = unit_price.per_label
+    if result.outcome == cmp.FIRST:
+        return "比較：這是這個類別的第一筆"
+    if result.outcome == cmp.NO_COMPARABLE:
+        return "比較：單位不同，無法比較（已照樣記下來）"
+    if result.outcome == cmp.NEW_LOWEST:
+        return "比較：這次是目前最低"
+    low = result.lowest
+    who = low.name + (f"（{low.brand}）" if low.brand else "")
+    if result.outcome == cmp.TIES_LOWEST:
+        return f"比較：和目前最低一樣（{who}，{label} {format_number(low.unit_price)}）"
+    return (f"比較：歷史最低是 {who}，{label} {format_number(low.unit_price)}；"
+            f"這次貴了 {format_number(result.diff)}（{format_number(result.diff_pct)}%）")
+
+
+def for_extraction(ex: Extraction, unit_price: UnitPrice | None,
+                   result: cmp.Comparison | None = None) -> str:
     if ex.status == "unreadable":
         return f"看不清楚：{ex.reason}。請重拍一張更清楚的。"
     if ex.status == "not_label":
@@ -55,6 +73,6 @@ def for_extraction(ex: Extraction, unit_price: UnitPrice | None) -> str:
     if ex.store:
         lines.append(f"店家：{ex.store}")
     lines.append(f"單價：{unit_price.per_label} {format_number(unit_price.value)}")
-    # 階段 2 專用：階段 3 做完存檔與比較後，這行拿掉
-    lines.append("（階段 2：還沒存檔，也還沒有和歷史比較）")
+    if result is not None:
+        lines.append(comparison(result, unit_price))
     return "\n".join(lines)

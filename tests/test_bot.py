@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import discord
 import pytest
 
 from unit_price_agent import bot as bot_module
@@ -172,3 +173,112 @@ def test_process_not_a_label_explains_and_asks_to_resend(tmp_path):
     with patch.object(bot_module, "extract_from_image", AsyncMock(return_value=data)):
         text = asyncio.run(bot._process(job_for(bot, fake_att())))
     assert "一隻貓" in text and "重傳" in text
+
+
+def test_first_record_is_saved_then_same_price_ties(tmp_path):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    with patch.object(bot_module, "extract_from_image", AsyncMock(return_value=OK)):
+        first = asyncio.run(bot._process(job_for(bot, fake_att())))
+        second = asyncio.run(bot._process(job_for(bot, fake_att())))
+    assert "這是這個類別的第一筆" in first
+    assert "比較：和目前最低一樣" in second
+    assert len(bot.store.user_records(7)) == 2 and bot.store.user_categories(7) == ["鮮奶"]
+
+
+def test_unreadable_photo_is_not_saved(tmp_path):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    with patch.object(bot_module, "extract_from_image",
+                      AsyncMock(return_value={"status": "unreadable", "reason": "糊"})):
+        asyncio.run(bot._process(job_for(bot, fake_att())))
+    assert not (tmp_path / "records.xlsx").exists() and not (tmp_path / "photos").exists()
+
+
+def test_store_failure_replies_retry_message(tmp_path):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    with patch.object(bot_module, "extract_from_image", AsyncMock(return_value=OK)), \
+         patch("unit_price_agent.store.os.replace", side_effect=PermissionError):
+        text = asyncio.run(bot._process(job_for(bot, fake_att())))
+    assert text == "這次處理失敗，請稍後再傳一次"
+    assert not (tmp_path / "records.xlsx").exists()
+    assert not list((tmp_path / "photos").iterdir())
+
+
+def run_worker(bot, jobs):
+    async def go():
+        for job in jobs:
+            await bot.queue.put(job)
+        worker = asyncio.create_task(bot._worker())
+        await bot.queue.join()
+        worker.cancel()
+    asyncio.run(go())
+
+
+def fake_status(id_=555, edit_error=None):
+    status = SimpleNamespace(id=id_)
+    status.edit = AsyncMock(side_effect=edit_error, return_value=status)  # 真的 edit 回傳編輯後的訊息
+    return status
+
+
+def http_error(status=404):
+    return discord.NotFound(SimpleNamespace(status=status, reason="x"), "gone")
+
+
+def test_result_edits_the_processing_message_and_uses_its_id(tmp_path):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    msg, status = fake_msg([fake_att()]), fake_status()
+    with patch.object(bot_module, "extract_from_image", AsyncMock(return_value=OK)):
+        run_worker(bot, [bot_module.Job(msg, msg.attachments[0], 1, 1, status)])
+    status.edit.assert_awaited_once()
+    kwargs = status.edit.await_args.kwargs
+    assert "單價：每 100ml 9.51" in kwargs["content"]
+    assert kwargs["allowed_mentions"].everyone is False and kwargs["allowed_mentions"].users is False
+    msg.reply.assert_not_awaited()  # 不另外送新訊息
+    assert bot.store.all_records()[0].reply_id == "555"
+
+
+def test_failure_text_also_replaces_the_processing_message(tmp_path):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    msg, status = fake_msg([fake_att()]), fake_status()
+    with patch.object(bot_module, "extract_from_image", AsyncMock(side_effect=ClaudeError("x"))):
+        run_worker(bot, [bot_module.Job(msg, msg.attachments[0], 1, 1, status)])
+    assert status.edit.await_args.kwargs["content"] == "這次處理失敗，請稍後再傳一次"
+    msg.reply.assert_not_awaited()
+
+
+def test_edit_failure_falls_back_to_new_reply_and_updates_reply_id(tmp_path, caplog):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    msg, status = fake_msg([fake_att()]), fake_status(edit_error=http_error())
+    msg.reply = AsyncMock(return_value=SimpleNamespace(id=777))
+    with patch.object(bot_module, "extract_from_image", AsyncMock(return_value=OK)),          caplog.at_level("WARNING", logger="unit_price_agent"):
+        run_worker(bot, [bot_module.Job(msg, msg.attachments[0], 1, 1, status)])
+    assert "單價：每 100ml 9.51" in msg.reply.await_args.args[0]
+    assert any("編輯" in r.message for r in caplog.records)
+    assert bot.store.all_records()[0].reply_id == "777"
+
+
+def test_each_image_gets_its_own_processing_message(tmp_path):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    msg = fake_msg([fake_att(), fake_att()])
+    asyncio.run(bot.on_message(msg))
+    assert replies_of(msg) == ["【第 1 張】處理中…", "【第 2 張】處理中…"]
+    assert bot.queue.qsize() == 2
+
+
+def test_reminders_stay_separate_messages_and_are_not_edited(tmp_path):
+    bot = bot_module.PriceBot(make_settings(tmp_path, max_photos_per_user_per_hour=1))
+    msg = fake_msg([fake_att() for _ in range(6)])
+    asyncio.run(bot.on_message(msg))
+    texts = replies_of(msg)
+    assert "一次最多 5 張，其餘請分開傳" in texts and "這個小時傳太多了，請稍後再傳" in texts
+    assert texts.count("處理中…") == 1 and bot.queue.qsize() == 1
+
+
+def test_validation_failure_logs_field_and_rule_but_not_the_model_text(tmp_path, caplog):
+    bot = bot_module.PriceBot(make_settings(tmp_path))
+    bad = dict(OK, price="SECRET-MODEL-TEXT", name="SECRET-NAME")
+    with patch.object(bot_module, "extract_from_image", AsyncMock(return_value=bad)), \
+         caplog.at_level("WARNING", logger="unit_price_agent"):
+        text = asyncio.run(bot._process(job_for(bot, fake_att())))
+    assert "不合理" in text
+    assert "價格：不是數字" in caplog.text
+    assert "SECRET" not in caplog.text

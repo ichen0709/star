@@ -7,15 +7,18 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import discord
 
 from . import replies
+from .compare import compare
 from .claude_client import ClaudeError, extract_from_image
 from .config import Settings
-from .store import load_state, save_state
+from .store import RecordStore, StoreError, load_state, save_state
 from .units import unit_price
 from .validate import ValidationError, check_image_bytes, validate_extraction
 
@@ -23,6 +26,7 @@ log = logging.getLogger("unit_price_agent")
 
 MAX_IMAGES_PER_MESSAGE = 5
 WINDOW_SECONDS = 3600
+TAIPEI = ZoneInfo("Asia/Taipei")
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
 
@@ -65,6 +69,7 @@ class Job:
     attachment: discord.Attachment
     number: int
     total: int
+    status: discord.Message | None = None  # 那張照片的「處理中…」訊息；處理完會被編輯成結果
 
 
 class PriceBot(discord.Client):
@@ -76,6 +81,7 @@ class PriceBot(discord.Client):
         self.settings = settings
         self.queue: asyncio.Queue[Job] = asyncio.Queue()
         self.limiter = RateLimiter(settings.data_dir / "state.json")
+        self.store = RecordStore(settings.data_dir)
         self.fatal: str | None = None  # 啟動後發現的致命問題，main 會印出來並結束
 
     async def setup_hook(self) -> None:
@@ -120,26 +126,44 @@ class PriceBot(discord.Client):
         if not images:
             return
 
-        await self._reply(message, replies.processing(len(images)))
         for number, att in enumerate(images, start=1):
-            await self.queue.put(Job(message, att, number, len(images)))
+            status = await self._reply(message, replies.processing(number, len(images)))
+            await self.queue.put(Job(message, att, number, len(images), status))
 
     # ---- 佇列的 worker：一次處理一件 ----
     async def _worker(self) -> None:
         while True:
             job = await self.queue.get()
+            record_id = None
             try:
-                text = await self._process(job)
+                text, record_id = await self._process_job(job)
             except Exception as exc:  # 一件出錯不能讓 worker 停掉
                 log.error("處理時發生未預期的錯誤：%s", type(exc).__name__)
                 text = replies.failure()
-            await self._reply(job.message, replies.prefix(job.number, job.total) + text)
+            final = await self._deliver(job, replies.prefix(job.number, job.total) + text)
+            stored_id = job.status.id if job.status is not None else None
+            if record_id is not None and final is not None and final.id != stored_id:
+                try:  # 改成送了新訊息，回覆訊息 ID 跟著換（修正時靠它找到這一筆）
+                    await asyncio.to_thread(self.store.set_reply_id, record_id, final.id)
+                except StoreError as exc:
+                    log.error("記回覆訊息 ID 失敗：%s", exc)
             self.queue.task_done()
 
-    def known_categories(self, user_id: int) -> list[str]:
-        return []  # 階段 3 改成這個人用過的類別
+    async def _deliver(self, job: Job, content: str) -> discord.Message | None:
+        """把結果編輯進「處理中…」那則訊息；編輯失敗就改送新的回覆。回傳最後留下的那則訊息。"""
+        if job.status is not None:
+            try:
+                return await job.status.edit(content=content,
+                                             allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException as exc:
+                log.warning("編輯「處理中…」訊息失敗（HTTP %s），改送一則新的回覆", exc.status)
+        return await self._reply(job.message, content)
 
     async def _process(self, job: Job) -> str:
+        return (await self._process_job(job))[0]
+
+    async def _process_job(self, job: Job) -> tuple[str, int | None]:
+        """回傳（回覆文字, 新紀錄編號或 None）。讀寫 Excel 都在這裡，也就是都在 worker 裡。"""
         settings = self.settings
         try:
             if job.attachment.size > settings.max_image_mb * 1024 * 1024:
@@ -147,30 +171,51 @@ class PriceBot(discord.Client):
             data = await job.attachment.read()
             ext = check_image_bytes(data, settings.max_image_mb)
         except ValidationError:
-            return replies.bad_image(settings.max_image_mb)
+            return replies.bad_image(settings.max_image_mb), None
         except discord.HTTPException:
-            return replies.failure()
+            return replies.failure(), None
 
-        known = self.known_categories(job.message.author.id)
+        user = job.message.author
+        try:
+            known = await asyncio.to_thread(self.store.user_categories, user.id)
+        except StoreError as exc:
+            log.error("讀紀錄失敗：%s", exc)
+            return replies.failure(), None
         try:
             raw = await extract_from_image(settings, data, ext, known)
         except ClaudeError as exc:
             log.error("claude 處理失敗：%s", type(exc).__name__)
-            return replies.failure()
+            return replies.failure(), None
         try:
             extraction = validate_extraction(raw, known)
-        except ValidationError:
-            return replies.unreasonable()
+        except ValidationError as exc:  # 訊息只有「欄位：規則」，不含 claude 的原文
+            log.warning("辨識結果驗證失敗：%s", exc)
+            return replies.unreasonable(), None
+        if extraction.status != "ok":
+            return replies.for_extraction(extraction, None), None
 
-        price = None
-        if extraction.status == "ok":
-            price = unit_price(extraction.price, extraction.amount, extraction.unit)
-        return replies.for_extraction(extraction, price)
-
-    async def _reply(self, message: discord.Message, text: str) -> None:
+        price = unit_price(extraction.price, extraction.amount, extraction.unit)
         try:
-            await message.reply(text, mention_author=False)
+            history = await asyncio.to_thread(self.store.user_records, user.id)
+            result = compare(history, user_id=str(user.id), category=extraction.category,
+                             kind=price.kind, value=price.value)
+            record = await asyncio.to_thread(
+                self.store.add_record, when=datetime.now(TAIPEI).replace(tzinfo=None),
+                user_id=user.id, user_name=getattr(user, "display_name", "") or str(user.id),
+                category=extraction.category, name=extraction.name, brand=extraction.brand,
+                price=extraction.price, amount=extraction.amount, unit=extraction.unit.unit,
+                unit_price=price.value, store=extraction.store, photo_bytes=data, photo_ext=ext,
+                reply_id=job.status.id if job.status is not None else "")
+        except StoreError as exc:  # 例如 Excel 開著鎖住檔案；照片和半成品已在 store 裡清掉
+            log.error("存檔失敗：%s", exc)
+            return replies.failure(), None
+        return replies.for_extraction(extraction, price, result), record.record_id
+
+    async def _reply(self, message: discord.Message, text: str) -> discord.Message | None:
+        try:
+            return await message.reply(text, mention_author=False)
         except discord.Forbidden:
             log.error("bot 在這個頻道沒有傳送訊息的權限，請檢查 Send Messages 權限")
         except discord.HTTPException as exc:
             log.error("傳送回覆失敗：HTTP %s", exc.status)
+        return None

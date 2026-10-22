@@ -25,7 +25,7 @@ def test_known_category_name_is_reused():
 @pytest.mark.parametrize("override", [
     {"price": 0}, {"price": -1}, {"price": "89"}, {"price": None},
     {"amount": 0}, {"amount": None}, {"unit": "oz"}, {"unit": ""},
-    {"name": ""}, {"name": "   "}, {"category": ""}, {"category": "=1+1"},
+    {"name": ""}, {"name": "   "},
 ])
 def test_bad_fields_are_rejected(override):
     with pytest.raises(ValidationError):
@@ -203,11 +203,35 @@ def test_empty_brand_or_store_after_cleaning_means_none(field, value):
     assert getattr(ex, field) == ""
 
 
-def test_category_still_follows_the_category_rules_not_the_text_cleaning():
-    # 類別不會被「清洗成能用」，不合規則就是不合規則
-    with pytest.raises(ValidationError):
-        validate_extraction(ok_data(category="**鮮奶**"), [])
+def test_category_with_slash_is_cleaned_not_rejected():
+    assert validate_extraction(ok_data(category="鮮奶/牛奶"), []).category == "鮮奶牛奶"
     assert validate_extraction(ok_data(category="鮮奶"), ["鮮奶"]).category == "鮮奶"
+
+
+def test_category_equals_1_plus_1_is_cleaned_and_name_stays_plain_text_data():
+    ex = validate_extraction(ok_data(name="=1+1", category="=1+1"), [])
+    assert ex.name == "=1+1" and ex.category == "11"
+
+
+@pytest.mark.parametrize("category", ["", "   ", "/// ", None])
+def test_empty_category_uses_the_cleaned_name(category):
+    ex = validate_extraction(ok_data(name="光泉/鮮乳", category=category), [])
+    assert ex.category == "光泉鮮乳"
+    assert validate_extraction(ok_data(name="名" * 40, category=category), []).category == "名" * 20
+
+
+def test_name_with_nothing_usable_for_a_category_is_a_recognition_failure():
+    with pytest.raises(ValidationError, match="類別"):
+        validate_extraction(ok_data(name="!!!", category=""), [])
+
+
+def test_validation_errors_name_the_field_and_never_quote_the_model():
+    secret = "SECRET-MODEL-TEXT"
+    for override, field in [({"price": secret}, "價格"), ({"amount": None}, "容量"),
+                            ({"unit": secret}, "單位"), ({"name": "***"}, "品名")]:
+        with pytest.raises(ValidationError) as info:
+            validate_extraction(ok_data(**override), [])
+        assert str(info.value).startswith(field) and secret not in str(info.value)
 
 
 def test_reply_never_contains_mentions_links_or_markdown_from_the_model():

@@ -77,10 +77,29 @@ def test_category_accepts_new_valid_name():
     assert validate_category("礦泉水", ["鮮奶"]) == "礦泉水"
 
 
-@pytest.mark.parametrize("raw", ["", "   ", "鮮奶=1+1", "a" * 30, "鮮奶/牛奶", "../x", None, 5])
-def test_category_rejects_bad_names(raw):
-    with pytest.raises(ValidationError):
-        validate_category(raw, ["鮮奶"])
+@pytest.mark.parametrize("raw, expected", [
+    ("鮮奶/牛奶", "鮮奶牛奶"), ("../x", "x"), ("鮮奶=1+1", "鮮奶11"), ("**鮮奶**", "鮮奶"),
+    ("Coca Cola", "CocaCola"), ("a" * 30, "a" * 20), ("鮮奶!", "鮮奶"),
+])
+def test_category_is_cleaned_to_chinese_english_digits_and_20_chars(raw, expected):
+    assert validate_category(raw, []) == expected
+
+
+def test_cleaned_category_still_reuses_the_known_spelling():
+    assert validate_category("鮮奶/", ["鮮奶"]) == "鮮奶"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "=+-", "///", None, 5])
+def test_empty_category_falls_back_to_cleaned_name_limited_to_20(raw):
+    assert validate_category(raw, [], "光泉/鮮乳 936ml") == "光泉鮮乳936ml"
+    assert validate_category(raw, [], "名" * 30) == "名" * 20
+
+
+@pytest.mark.parametrize("raw", ["", "=+-", None])
+@pytest.mark.parametrize("name", ["", "   ", "!!!", "///", None])
+def test_category_and_name_both_empty_is_an_error_naming_the_field(raw, name):
+    with pytest.raises(ValidationError, match="類別"):
+        validate_category(raw, ["鮮奶"], name)
 
 
 @pytest.mark.parametrize("raw", [89, 89.5, 0.01])
