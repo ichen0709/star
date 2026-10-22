@@ -83,10 +83,12 @@ def fake_att(data=PNG, filename="a.png", size=None):
                            size=len(data) if size is None else size, read=AsyncMock(return_value=data))
 
 
-def fake_msg(attachments, channel_id=42, author_id=7, is_bot=False):
+def fake_msg(attachments, channel_id=42, author_id=7, is_bot=False, content="", mentions=(),
+             reference=None):
     return SimpleNamespace(author=SimpleNamespace(id=author_id, bot=is_bot),
                            channel=SimpleNamespace(id=channel_id),
-                           attachments=attachments, reply=AsyncMock())
+                           attachments=attachments, reply=AsyncMock(), content=content,
+                           mentions=list(mentions), reference=reference)
 
 
 def replies_of(msg):

@@ -237,3 +237,13 @@ async def extract_from_image(settings: Settings, data: bytes, ext: str,
         image = place_image(workdir, data, ext)
         prompt = build_extract_prompt(image.name, known_categories)
         return await run_claude(settings, prompt, EXTRACT_SCHEMA, workdir, TOOLS_VISION)
+
+
+async def interpret_text(settings: Settings, text: str, known_categories: list[str]) -> dict:
+    """一句白話 → claude 轉成固定格式（修正／查詢／none）。還沒驗證，由呼叫端驗證。
+
+    claude 完全沒有工具（TOOLS_NONE），工作資料夾是空的；只看得到這一句話和類別名稱。
+    """
+    with fresh_workdir(settings.data_dir) as workdir:
+        prompt = build_intent_prompt(text, known_categories)
+        return await run_claude(settings, prompt, INTENT_SCHEMA, workdir, TOOLS_NONE)

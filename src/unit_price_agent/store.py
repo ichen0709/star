@@ -21,6 +21,9 @@ HEADERS = ["紀錄編號", "日期時間", "上傳者 Discord ID", "上傳者", 
 (COL_ID, COL_WHEN, COL_USER_ID, COL_USER, COL_CATEGORY, COL_NAME, COL_BRAND, COL_PRICE,
  COL_AMOUNT, COL_UNIT, COL_UNIT_PRICE, COL_STORE, COL_PHOTO, COL_REPLY_ID) = range(1, 15)
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+_TEXT_FIELDS = {"name": COL_NAME, "brand": COL_BRAND, "store": COL_STORE, "category": COL_CATEGORY,
+                "unit": COL_UNIT}
+_NUMBER_FIELDS = {"price": COL_PRICE, "amount": COL_AMOUNT, "unit_price": COL_UNIT_PRICE}
 
 
 class StoreError(Exception):
@@ -126,6 +129,13 @@ class RecordStore:
             seen.setdefault(r.category)
         return list(seen)
 
+    def find_by_reply_id(self, reply_id: int | str) -> Record | None:
+        """用 bot 回覆訊息的 ID 找到那一筆（使用者回覆 bot 訊息來修正時用）。"""
+        for r in self.all_records():
+            if r.reply_id == str(reply_id):
+                return r
+        return None
+
     # ---- 寫 ----
     def _write_photo(self, when: datetime, name: str, ext: str, data: bytes) -> Path:
         name_ = build_photo_filename(when, name, ext)
@@ -203,3 +213,29 @@ class RecordStore:
         except (OSError, ValueError, KeyError) as exc:
             raise StoreError("更新回覆訊息 ID 失敗") from exc
         raise StoreError("找不到這筆紀錄")
+
+    def update_record(self, record_id: int, **changes) -> Record:
+        """改一筆紀錄的欄位（name、brand、store、category、unit、price、amount、unit_price）。
+
+        照片檔名與「照片位置」不動。寫入方式和 add_record 一樣：先存暫存檔再換名，失敗不動原檔。
+        """
+        if set(changes) - set(_TEXT_FIELDS) - set(_NUMBER_FIELDS):
+            raise StoreError("不能修改這些欄位")
+        try:
+            wb = self._open_workbook()
+            ws = wb.active
+            for r in range(2, ws.max_row + 1):
+                if ws.cell(row=r, column=COL_ID).value == record_id:
+                    break
+            else:
+                raise StoreError("找不到這筆紀錄")
+            for field, value in changes.items():
+                if field in _TEXT_FIELDS:
+                    set_text_cell(ws, r, _TEXT_FIELDS[field], value)
+                else:
+                    ws.cell(row=r, column=_NUMBER_FIELDS[field], value=value)
+            self._save_workbook(wb)
+            row = next(ws.iter_rows(min_row=r, max_row=r, max_col=len(HEADERS), values_only=True))
+            return _record_from_row(row)
+        except (OSError, ValueError, KeyError) as exc:
+            raise StoreError("修改紀錄失敗") from exc

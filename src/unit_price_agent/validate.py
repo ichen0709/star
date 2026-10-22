@@ -86,7 +86,7 @@ def clean_text(text: object, max_len: int = MAX_TEXT_LEN) -> str:
     return text[:max_len].strip()
 
 
-def _category_chars(text: object) -> str:
+def category_chars(text: object) -> str:
     """只留中英文與數字，限 20 字。"""
     if not isinstance(text, str):
         return ""
@@ -98,7 +98,7 @@ def validate_category(raw: object, known: list[str], fallback_name: str = "") ->
 
     清完是空的，改用清洗後的品名（fallback_name，同樣限 20 字）；品名也清不出內容才丟 ValidationError。
     """
-    cleaned = _category_chars(raw) or _category_chars(fallback_name)
+    cleaned = category_chars(raw) or category_chars(fallback_name)
     if not cleaned:
         raise ValidationError("類別：清洗後是空的，品名也清不出可用的字")
     for name in known:

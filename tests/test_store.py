@@ -93,3 +93,27 @@ def test_failed_write_leaves_no_photo_and_no_row(tmp_path, monkeypatch):
     assert len(store.all_records()) == 1
     assert len(list((tmp_path / "photos").iterdir())) == 1
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_find_by_reply_id_and_update_record(tmp_path):
+    store = RecordStore(tmp_path)
+    rec = add(store, reply_id=555)
+    add(store, user_id=2, reply_id=556)
+    assert store.find_by_reply_id(555) == rec and store.find_by_reply_id(1) is None
+    updated = store.update_record(rec.record_id, name="=1+1", price=99.0, unit_price=1.5)
+    assert (updated.name, updated.price, updated.unit_price, updated.photo) == ("=1+1", 99.0, 1.5, rec.photo)
+    assert store.find_by_reply_id(556).price == 89  # 別筆不動
+    cell = load_workbook(tmp_path / "records.xlsx").active.cell(row=2, column=6)
+    assert cell.data_type == "s" and cell.value == "=1+1"
+
+
+def test_update_record_rejects_unknown_fields_and_missing_ids(tmp_path):
+    store = RecordStore(tmp_path)
+    add(store)
+    with pytest.raises(StoreError):
+        store.update_record(1, photo="x")
+    with pytest.raises(StoreError):
+        store.update_record(1, reply_id="1")
+    with pytest.raises(StoreError):
+        store.update_record(99, name="x")
+    assert store.all_records()[0].record_id == 1
